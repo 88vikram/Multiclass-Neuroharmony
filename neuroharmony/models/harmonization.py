@@ -14,9 +14,10 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from pandas.core.generic import NDFrame
 from pandas import Series, DataFrame, concat, merge
 from numpy import unique, number
-
+from imblearn.over_sampling import SMOTE
 from neuroharmony.models.neuroCombat import neuroCombat
-
+from collections import Counter
+import numpy as np 
 
 def exclude_single_subject_groups(df, covariates):
     """Exclude categories with only one subject.
@@ -96,12 +97,14 @@ class ComBat(BaseEstimator, TransformerMixin):
         ComBat harmonized DataFrame.
     """
 
-    def __init__(self, features, covariates, eliminate_variance):
+    def __init__(self, features, covariates, eliminate_variance,discrete_cols, continuous_cols):
         """Init class."""
         self.covariates = covariates
         self.eliminate_variance = eliminate_variance
         self.features = features
         self.reindexed = False
+        self.discrete_cols = discrete_cols
+        self.continuous_cols = continuous_cols
 
     def transform(self, df, y=None):
         """Run ComBat normalization.
@@ -257,6 +260,7 @@ class ComBat(BaseEstimator, TransformerMixin):
         for batch_col in self.eliminate_variance:
             harmonized = combat(
                 data=harmonized[self.features].copy(), covars=harmonized[self.covariates].copy(), batch_col=batch_col,
+                discrete_cols = self.discrete_cols, continuous_cols = self.continuous_cols,
             )
             harmonized = self._reconstruct_original_fieds(df, harmonized, extra_vars)
         return harmonized
@@ -310,6 +314,8 @@ class Neuroharmony(TransformerMixin, BaseEstimator):
         regression_features,
         covariates,
         eliminate_variance,
+        discrete_cols = [],
+        continuous_cols = [],
         estimator=RandomForestRegressor(),
         scaler=StandardScaler(),
         decomposition=PCA(),
@@ -329,6 +335,14 @@ class Neuroharmony(TransformerMixin, BaseEstimator):
         self.regression_features = regression_features
         self.covariates = covariates
         self.eliminate_variance = eliminate_variance
+        if len(discrete_cols)>0:
+            self.discrete_cols = discrete_cols
+        else:
+            self.discrete_cols = None
+        if len(continuous_cols) > 0:
+            self.continuous_cols = continuous_cols
+        else:
+            self.continuous_cols = None
         self.estimator = estimator
         self.scaler = scaler
         self.decomposition = decomposition
@@ -363,6 +377,7 @@ class Neuroharmony(TransformerMixin, BaseEstimator):
         df = self._check_index(df.copy())
         df, self.encoders = _label_encode_covariates(df.copy(), unique(self.covariates + self.eliminate_variance))
         X_train_split, y_train_split = self._run_combat(df.copy())
+
         self.models_by_feature_ = {}
         desc = "Randomized search of Neuroharmony hyperparameters: "
         if self.model_strategy not in ["full", "single"]:
@@ -612,13 +627,41 @@ class Neuroharmony(TransformerMixin, BaseEstimator):
 
     def _run_combat(self, df):
         self.extra_vars = df.columns[~df.columns.isin(self.features)]
-        combat = ComBat(self.features, self.covariates, self.eliminate_variance)
+        combat = ComBat(self.features, self.covariates, self.eliminate_variance, self.discrete_cols, self.continuous_cols)
         self.X_harmonized_ = combat.transform(df.copy())
         self.X_harmonized_ = _label_decode_covariates(
             self.X_harmonized_, unique(self.covariates + self.eliminate_variance), self.encoders,
         )
         self.X_harmonized_.drop_duplicates(inplace=True)
-        delta = df[self.features].subtract(self.X_harmonized_[self.features])
+        if self.discrete_cols is not None:
+            fields_of_interest = self.features + self.regression_features + self.covariates
+            df_resampled = df.iloc[self.X_harmonized_.index].copy(deep=True)
+
+            X_harmonized_resampled = self.X_harmonized_.copy(deep=True)
+
+            # Find groups with most imbalance and resample SMOTE for the one with the worst imbalance
+            imbalance_metric = []
+            for k in range(len(self.discrete_cols)):
+                c = Counter(df_resampled[self.discrete_cols[k]])
+                total = 0
+                individual = []
+                for l in list(c.keys()):
+                    total = total + c[l]
+                    individual.append(c[l])
+                proportion = np.min(individual) / total
+                imbalance_metric.append(proportion*len(individual))
+
+            kmin = np.argmin(imbalance_metric)
+            sm = SMOTE(random_state=42)
+            df_resampled, dum1 = sm.fit_resample(df_resampled[fields_of_interest],
+                                                        df_resampled[self.discrete_cols[kmin]])
+            X_harmonized_resampled, dum2 = sm.fit_resample(X_harmonized_resampled[self.features],
+                                                        X_harmonized_resampled[self.discrete_cols[kmin]])
+            df = df_resampled
+            X_harmonized_ = X_harmonized_resampled
+        else:
+            X_harmonized_ = self.X_harmonized_
+        delta = df[self.features].subtract(X_harmonized_[self.features])
         # if delta.shape != df.shape:
         #     raise ValueError(f'DELTA = {delta.shape}, DF = {df.shape}, xh = {self.X_harmonized_.shape}')
         # y_train_split = merge(delta, df[self.extra_vars], how="inner", on=index_name).set_index(index_name)
