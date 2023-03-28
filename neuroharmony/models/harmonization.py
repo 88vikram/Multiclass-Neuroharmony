@@ -444,7 +444,7 @@ class Neuroharmony(TransformerMixin, BaseEstimator):
             predicted_y = self.models_by_feature_["all"].predict(df[self.regression_features + self.features])
             self.predicted_ = df[self.features] - predicted_y
         if self.model_strategy == "single":
-            self.models_by_feature_[self.features[0]]._check_is_fitted("predict")
+            #self.models_by_feature_[self.features[0]]._check_is_fitted("predict")
             for var in self.features:
                 predicted_y_1 = self.models_by_feature_[var].predict(df[self.regression_features + [var]])
                 self.predicted_[var] = df[var] - predicted_y_1
